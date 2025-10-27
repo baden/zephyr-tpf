@@ -1,0 +1,6 @@
+name: fxa500-api
+build:
+  cmake: .
+  kconfig: Kconfig
+  #settings:
+  # board_root: .

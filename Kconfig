@@ -1,0 +1,36 @@
+comment "Zephyr TPF module"
+
+module = TPF_MODULE
+module-str = tpf-module
+source "subsys/logging/Kconfig.template.log_config"
+
+
+config TPF_MODULE
+    bool "TPF module"
+    default n
+
+    # imply FLASH
+    # imply FLASH_MAP
+    # imply MPU_ALLOW_FLASH_WRITE
+
+    select FLASH
+    select FLASH_MAP
+    # select STREAM_FLASH     # TODO: Можлицо це задіяти?
+    select MPU_ALLOW_FLASH_WRITE
+
+    select JSON_LIBRARY     # TODO: Можливо це можна буде зробити опціональним
+
+    help
+	    This option enables the TPF module.
+
+if TPF_MODULE
+
+# config TPF_NET_SAMPLE_APP_MAX_CONNECTIONS
+# 	int "Number of times to connect to the MQTT server"
+# 	default 0
+# 	help
+# 	  Number of times to connect to the MQTT server. With each connection
+# 	  send NET_SAMPLE_APP_MAX_ITERATIONS amount of MQTT sample messages.
+# 	  A value of zero means to continue forever.
+
+endif
