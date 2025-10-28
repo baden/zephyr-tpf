@@ -8,7 +8,8 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/nvs.h>
-#include "app_version.h"
+// #include "app_version.h"
+#include "io.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(tpf, LOG_LEVEL_DBG);
@@ -35,7 +36,19 @@ struct nvs_fixture {
 	struct stats_hdr *sim_thresholds;
 };
 
-#define ERASE_BLOCK_SIZE 2048
+// TODO: Якось це значення можна отримати від драйвера
+// FLASH_STM32_WRITE_BLOCK_SIZE
+
+// #define ERASE_BLOCK_SIZE 2048
+#define FLASH_PARTITION storage_partition_tpf
+#define FLASH_CONTROLLER DT_PARENT(DT_PARENT(DT_NODELABEL(FLASH_PARTITION)))
+#define FLASH_WRITE_SIZE DT_PROP(FLASH_CONTROLLER, write_block_size)
+#define FLASH_ERASE_BLOCK_SIZE DT_PROP(FLASH_CONTROLLER, erase_block_size)
+// #define ERASE_BLOCK_SIZE DT_PROP(DT_PARENT(TEST_NVS_FLASH_AREA_DEV), erase_block_size)
+
+
+#define FLASH_MEM CONFIG_FLASH_BASE_ADDRESS
+#define RAM_MEM   CONFIG_SRAM_BASE_ADDRESS
 
 void tpfDumpRam(void)
 {
@@ -47,6 +60,10 @@ void tpfDumpRam(void)
     LOG_INF("TPF Flash area constants.");
     LOG_INF("TPF_FLASH_AREA_OFFSET = %d", TPF_FLASH_AREA_OFFSET);
     LOG_INF("TPF_FLASH_AREA_SIZE = %d", TPF_FLASH_AREA_SIZE);
+    LOG_INF("FLASH_WRITE_SIZE = %d", FLASH_WRITE_SIZE);
+    LOG_INF("FLASH_ERASE_BLOCK_SIZE = %d", FLASH_ERASE_BLOCK_SIZE);
+    LOG_INF("FLASH_MEM = %x", FLASH_MEM);
+    LOG_INF("  RAM_MEM = %x", RAM_MEM);
 
 	__ASSERT_NO_MSG(device_is_ready(flash_dev));
 	__ASSERT_NO_MSG(device_is_ready(rom_flash_dev));
@@ -109,12 +126,12 @@ void tpfDumpRam(void)
     // Dump ROM-data
     off_t address = (off_t)&_progtable_start;
 
-    uint8_t buffer[ERASE_BLOCK_SIZE];
+    uint8_t buffer[FLASH_ERASE_BLOCK_SIZE];
     const uint8_t *rom_data = (const uint8_t *)address;
 
     // TODO: Немає ніякого сенсу читати через flash_read бо вся пам'ять
     // доступна для прямого читання. Це виключно для тесту.
-    flash_read(rom_flash_dev, address, &buffer, sizeof(buffer));
+    flash_read(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, &buffer, sizeof(buffer));
     LOG_HEXDUMP_INF(buffer, 64, "readed ROM of constants");
 
     LOG_HEXDUMP_INF(rom_data, 64, "direct ROM of constants");
@@ -123,7 +140,7 @@ void tpfDumpRam(void)
 
     LOG_INF("TPF Erasing....");
 	/* erase flash content */
-	flash_erase(rom_flash_dev, address, ERASE_BLOCK_SIZE);
+	flash_erase(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, FLASH_ERASE_BLOCK_SIZE);
 
     for(int i = 0; i < sizeof(buffer); i++) {
         buffer[i] = i;
@@ -174,7 +191,7 @@ void tpfDumpRam(void)
     flash_read(rom_flash_dev, TPF_FLASH_AREA_OFFSET, &buffer, sizeof(buffer));
     LOG_HEXDUMP_INF(buffer, 64, "readed TPF of constants");
 
-    flash_erase(rom_flash_dev, TPF_FLASH_AREA_OFFSET, ERASE_BLOCK_SIZE);
+    flash_erase(rom_flash_dev, TPF_FLASH_AREA_OFFSET, FLASH_ERASE_BLOCK_SIZE);
 
     for(int i = 0; i < sizeof(buffer); i++) {
         buffer[i] = i;
@@ -201,7 +218,7 @@ SYS_INIT(init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
 
 
 #include <stdio.h>
-#include "NuMicro.h"
+// #include "NuMicro.h"
 
 
 #define APROM_TEST_BASE             0x80000
@@ -488,6 +505,8 @@ void to_bit_field(t_tpf_BITFIELD value, char* buffer, size_t buffer_size)
 2. послідовність значень буде строго однакова для всіх варіантів вибору
 */
 
+#define FLASH_PAGE_SIZE 4096
+
 bool tpfPatchInMem(const char *name, const char *value)
 {
     LOG_DBG("tpfPatchInMem: %s=%s\n", name, value);
@@ -504,7 +523,7 @@ bool tpfPatchInMem(const char *name, const char *value)
     // char sub_value[32];
     // const char *p;
     // int i;
-    uint8_t buf[FMC_FLASH_PAGE_SIZE];
+    uint8_t buf[FLASH_PAGE_SIZE];
 
     iter_prgparm = tpfGetElement(name);
     if(iter_prgparm == 0) {
@@ -513,10 +532,10 @@ bool tpfPatchInMem(const char *name, const char *value)
     }
     LOG_DBG("tpfPatchInMem: [%s]=[%s] @0x%08x\n", iter_prgparm->name, value, (unsigned)iter_prgparm->value_ptr);
 
-    // Copy data from flash to RAM. Aligned to FMC_FLASH_PAGE_SIZE
-    uint32_t address = (uint32_t)iter_prgparm->value_ptr & ~(FMC_FLASH_PAGE_SIZE - 1);
+    // Copy data from flash to RAM. Aligned to FLASH_PAGE_SIZE
+    uint32_t address = (uint32_t)iter_prgparm->value_ptr & ~(FLASH_PAGE_SIZE - 1);
     LOG_DBG("tpfPatchInMem: address=0x%08x", address);
-    flash_read(rom_flash_dev, address, buf, FMC_FLASH_PAGE_SIZE);
+    flash_read(rom_flash_dev, address, buf, FLASH_PAGE_SIZE);
     uint32_t offset = (uint32_t)iter_prgparm->value_ptr - address;
     LOG_DBG("tpfPatchInMem: offset=0x%08x", offset);
     void *ramPointer = (void *)(buf + offset);
@@ -736,8 +755,8 @@ bool tpfPatchInMem(const char *name, const char *value)
     }
 
     // Write data back to flash
-    flash_erase(rom_flash_dev, address, FMC_FLASH_PAGE_SIZE);
-    flash_write(rom_flash_dev, address, buf, FMC_FLASH_PAGE_SIZE);
+    flash_erase(rom_flash_dev, address, FLASH_PAGE_SIZE);
+    flash_write(rom_flash_dev, address, buf, FLASH_PAGE_SIZE);
 
 	return true;
 }
@@ -870,7 +889,7 @@ int tpf_dump_as_json(char *buffer, size_t buffer_size, bool include_defaults, ui
     }
 
     p->version = CONFIG_APP_CONFIG_VERSION;
-    p->hardware = APP_VERSION_STR; // "fx500-02";
+    p->hardware = CONFIG_APP_VERSION_STRING; // "fx500-02";
     p->timestamp = timestamp;
 
     #define STRINGS_REPR_SIZE 8096

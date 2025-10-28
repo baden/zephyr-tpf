@@ -7,7 +7,7 @@ source "subsys/logging/Kconfig.template.log_config"
 
 config TPF_MODULE
     bool "TPF module"
-    default n
+    # default n
 
     # imply FLASH
     # imply FLASH_MAP
@@ -24,6 +24,19 @@ config TPF_MODULE
 	    This option enables the TPF module.
 
 if TPF_MODULE
+
+config APP_VERSION_STRING
+    string "Application version"
+    default "0.0.0"
+    help
+      Use this to set the application version.
+
+
+config APP_CONFIG_VERSION
+    string "Application configuration version"
+    default "0.0.0"
+    help
+      Use this to set the application configuration version.
 
 # config TPF_NET_SAMPLE_APP_MAX_CONNECTIONS
 # 	int "Number of times to connect to the MQTT server"
