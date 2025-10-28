@@ -1,4 +1,4 @@
-name: fxa500-api
+name: fxa500_fpf
 build:
   cmake: .
   kconfig: Kconfig
