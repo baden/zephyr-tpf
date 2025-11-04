@@ -8,7 +8,7 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/nvs.h>
-// #include "app_version.h"
+#include "app_version.h"
 #include "io.h"
 
 #include <zephyr/logging/log.h>
@@ -889,7 +889,7 @@ int tpf_dump_as_json(char *buffer, size_t buffer_size, bool include_defaults, ui
     }
 
     p->version = CONFIG_APP_CONFIG_VERSION;
-    p->hardware = CONFIG_APP_VERSION_STRING; // "fx500-02";
+    p->hardware = APP_VERSION_STRING;
     p->timestamp = timestamp;
 
     #define STRINGS_REPR_SIZE 8096

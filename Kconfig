@@ -25,12 +25,11 @@ config TPF_MODULE
 
 if TPF_MODULE
 
-config APP_VERSION_STRING
-    string "Application version"
-    default "0.0.0"
-    help
-      Use this to set the application version.
-
+# config APP_VERSION_STRING
+#     string "Application version"
+#     default "0.0.0"
+#     help
+#       Use this to set the application version.
 
 config APP_CONFIG_VERSION
     string "Application configuration version"
