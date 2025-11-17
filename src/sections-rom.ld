@@ -1,7 +1,7 @@
 #include <zephyr/linker/iterable_sections.h>
 
 ITERABLE_SECTION_ROM(tPrgParm, 4)
-/* Теоретично достатньо вирівняти на 2048, розмір сторінки, яку можна стирати. */
+/* Теоретично достатньо вирівняти на розмір сторінки, яку можна стирати (8K для STM32H5xx). */
 SECTION_PROLOGUE(progtable,,ALIGN(65536))
 {
     _progtable_start = .;
