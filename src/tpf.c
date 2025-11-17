@@ -10,10 +10,19 @@
 #include <zephyr/fs/nvs.h>
 #include "app_version.h"
 #include "io.h"
+#include <zephyr/linker/linker-defs.h>
+#include <zephyr/linker/section_tags.h>
+#include <zephyr/linker/devicetree_regions.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(tpf, LOG_LEVEL_DBG);
 
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(sram3), okay)
+#define _SRAM3_SECTION Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME(DT_NODELABEL(sram3)))
+#else
+#define _SRAM3_SECTION
+#endif
 
 extern const void *_progtable_start;
 extern const void *_progtable_stop;
@@ -46,9 +55,14 @@ struct nvs_fixture {
 #define FLASH_ERASE_BLOCK_SIZE DT_PROP(FLASH_CONTROLLER, erase_block_size)
 // #define ERASE_BLOCK_SIZE DT_PROP(DT_PARENT(TEST_NVS_FLASH_AREA_DEV), erase_block_size)
 
-
 #define FLASH_MEM CONFIG_FLASH_BASE_ADDRESS
 #define RAM_MEM   CONFIG_SRAM_BASE_ADDRESS
+
+static uint8_t ram_buffer[FLASH_ERASE_BLOCK_SIZE] _SRAM3_SECTION;
+
+TPF_DEF(VOLTAGE, test_fpf, 12.3);
+
+int tpf_item_to_string(const struct tPrgParm *iter_prgparm, char* buf, size_t len, bool def);
 
 void tpfDumpRam(void)
 {
@@ -58,12 +72,12 @@ void tpfDumpRam(void)
     static struct nvs_fixture fixture;
 
     LOG_INF("TPF Flash area constants.");
-    LOG_INF("TPF_FLASH_AREA_OFFSET = %d", TPF_FLASH_AREA_OFFSET);
+    LOG_INF("TPF_FLASH_AREA_OFFSET = 0x%08x", TPF_FLASH_AREA_OFFSET);
     LOG_INF("TPF_FLASH_AREA_SIZE = %d", TPF_FLASH_AREA_SIZE);
     LOG_INF("FLASH_WRITE_SIZE = %d", FLASH_WRITE_SIZE);
     LOG_INF("FLASH_ERASE_BLOCK_SIZE = %d", FLASH_ERASE_BLOCK_SIZE);
-    LOG_INF("FLASH_MEM = %x", FLASH_MEM);
-    LOG_INF("  RAM_MEM = %x", RAM_MEM);
+    LOG_INF("FLASH_MEM = 0x%08x", FLASH_MEM);
+    LOG_INF("  RAM_MEM = 0x%08x", RAM_MEM);
 
 	__ASSERT_NO_MSG(device_is_ready(flash_dev));
 	__ASSERT_NO_MSG(device_is_ready(rom_flash_dev));
@@ -87,122 +101,69 @@ void tpfDumpRam(void)
     LOG_INF("__progtable_stop = 0x%08x", (unsigned)&_progtable_stop);
     LOG_INF("__progtable_end = 0x%08x", (unsigned)&_progtable_end);
 
+    char s[64];
 
-
-    STRUCT_SECTION_FOREACH(tPrgParm, p) {
-        tprg_type t = p->type;
-        switch (t)
-        {
-        case PRG_TYPE_TIME: {
-            const k_timeout_t* t = (k_timeout_t*)(p->value_ptr);
-            uint32_t ms = k_ticks_to_ms_floor32(t->ticks);
-            if(ms % 1000 == 0) {
-                LOG_INF("tpf(%s)= K_SECONDS(%d)", p->name, ms/1000);
-            } else {
-                LOG_INF("tpf(%s)= K_MSEC(%d)", p->name, ms);
-            }
-            break;
-        }
-
-
-        case PRG_TYPE_INPUT: {
-            const uint8_t* v = (uint8_t*)(p->value_ptr);
-            LOG_INF("tpf(%s)=%s", p->name, io_input_func_to_value(*v));
-            break;
-        }
-
-        case PRG_TYPE_OUTPUT: {
-            const uint8_t* v = (uint8_t*)(p->value_ptr);
-            LOG_INF("tpf(%s)=%s", p->name, io_output_func_to_value(*v));
-            break;
-        }
-
-        default:
-            LOG_INF("tpf(%s)=%d", p->name, *(int*)p->value_ptr);
-            break;
-        }
+    STRUCT_SECTION_FOREACH(tPrgParm, prg) {
+        int ret = tpf_item_to_string(prg, s, sizeof(s), false);
+        LOG_INF("TPF item: %s = %s", prg->name, s);
     }
 
     // Dump ROM-data
     off_t address = (off_t)&_progtable_start;
 
-    uint8_t buffer[FLASH_ERASE_BLOCK_SIZE];
     const uint8_t *rom_data = (const uint8_t *)address;
 
     // TODO: Немає ніякого сенсу читати через flash_read бо вся пам'ять
     // доступна для прямого читання. Це виключно для тесту.
-    flash_read(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, &buffer, sizeof(buffer));
-    LOG_HEXDUMP_INF(buffer, 64, "readed ROM of constants");
+    flash_read(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, &ram_buffer, sizeof(ram_buffer));
+    LOG_INF("Read data over flash_read @ 0x%08x", address - CONFIG_FLASH_BASE_ADDRESS);
+    LOG_HEXDUMP_INF(ram_buffer, 64, "readed ROM of constants");
 
     LOG_HEXDUMP_INF(rom_data, 64, "direct ROM of constants");
 
     // TPF_test1("in_func");
 
+    tpfPatchInMem("test_fpf", "3.21");
+
+    #if 0
     LOG_INF("TPF Erasing....");
 	/* erase flash content */
 	flash_erase(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, FLASH_ERASE_BLOCK_SIZE);
 
-    for(int i = 0; i < sizeof(buffer); i++) {
-        buffer[i] = i;
+    for(int i = 0; i < sizeof(ram_buffer); i++) {
+        ram_buffer[i] = i;
     }
+    #endif
 
     // LOG_INF("TPF Write data.");
-    // flash_write(rom_flash_dev, address, &buffer, sizeof(buffer));
+    // flash_write(rom_flash_dev, address, &ram_buffer, sizeof(ram_buffer));
 
 
     LOG_INF("Dump again.");
 
-    STRUCT_SECTION_FOREACH(tPrgParm, p) {
-        tprg_type t = p->type;
-        switch (t)
-        {
-        case PRG_TYPE_TIME: {
-            const k_timeout_t* t = (k_timeout_t*)(p->value_ptr);
-            uint32_t ms = k_ticks_to_ms_floor32(t->ticks);
-            if(ms % 1000 == 0) {
-                LOG_INF("tpf(%s)= K_SECONDS(%d)", p->name, ms/1000);
-            } else {
-                LOG_INF("tpf(%s)= K_MSEC(%d)", p->name, ms);
-            }
-            break;
-        }
-
-        case PRG_TYPE_INPUT: {
-            const uint8_t* v = (uint8_t*)(p->value_ptr);
-            LOG_INF("tpf(%s)=%s", p->name, io_input_func_to_value(*v));
-            break;
-        }
-
-        case PRG_TYPE_OUTPUT: {
-            const uint8_t* v = (uint8_t*)(p->value_ptr);
-            LOG_INF("tpf(%s)=%s", p->name, io_output_func_to_value(*v));
-            break;
-        }
-
-        default:
-            LOG_INF("tpf(%s)=%d", p->name, *(int*)p->value_ptr);
-            break;
-        }
+    STRUCT_SECTION_FOREACH(tPrgParm, prg) {
+        int ret = tpf_item_to_string(prg, s, sizeof(s), false);
+        LOG_INF("TPF item: %s = %s", prg->name, s);
     }
 
     LOG_HEXDUMP_INF(rom_data, 64, "direct ROM of constants");
 
-
-    flash_read(rom_flash_dev, TPF_FLASH_AREA_OFFSET, &buffer, sizeof(buffer));
-    LOG_HEXDUMP_INF(buffer, 64, "readed TPF of constants");
+    #if 0
+    flash_read(rom_flash_dev, TPF_FLASH_AREA_OFFSET, &ram_buffer, sizeof(ram_buffer));
+    LOG_HEXDUMP_INF(ram_buffer, 64, "readed TPF of constants");
 
     flash_erase(rom_flash_dev, TPF_FLASH_AREA_OFFSET, FLASH_ERASE_BLOCK_SIZE);
 
-    for(int i = 0; i < sizeof(buffer); i++) {
-        buffer[i] = i;
+    for(int i = 0; i < sizeof(ram_buffer); i++) {
+        ram_buffer[i] = i;
     }
 
     LOG_INF("TPF Write data.");
-    flash_write(rom_flash_dev, TPF_FLASH_AREA_OFFSET, &buffer, sizeof(buffer));
+    flash_write(rom_flash_dev, TPF_FLASH_AREA_OFFSET, &ram_buffer, sizeof(ram_buffer));
 
-    flash_read(rom_flash_dev, TPF_FLASH_AREA_OFFSET, &buffer, sizeof(buffer));
-    LOG_HEXDUMP_INF(buffer, 64, "readed TPF of constants");
-
+    flash_read(rom_flash_dev, TPF_FLASH_AREA_OFFSET, &ram_buffer, sizeof(ram_buffer));
+    LOG_HEXDUMP_INF(ram_buffer, 64, "readed TPF of constants");
+    #endif
 }
 
 static int init(void)
@@ -505,7 +466,6 @@ void to_bit_field(t_tpf_BITFIELD value, char* buffer, size_t buffer_size)
 2. послідовність значень буде строго однакова для всіх варіантів вибору
 */
 
-#define FLASH_PAGE_SIZE 4096
 
 bool tpfPatchInMem(const char *name, const char *value)
 {
@@ -523,7 +483,6 @@ bool tpfPatchInMem(const char *name, const char *value)
     // char sub_value[32];
     // const char *p;
     // int i;
-    uint8_t buf[FLASH_PAGE_SIZE];
 
     iter_prgparm = tpfGetElement(name);
     if(iter_prgparm == 0) {
@@ -532,13 +491,13 @@ bool tpfPatchInMem(const char *name, const char *value)
     }
     LOG_DBG("tpfPatchInMem: [%s]=[%s] @0x%08x\n", iter_prgparm->name, value, (unsigned)iter_prgparm->value_ptr);
 
-    // Copy data from flash to RAM. Aligned to FLASH_PAGE_SIZE
-    uint32_t address = (uint32_t)iter_prgparm->value_ptr & ~(FLASH_PAGE_SIZE - 1);
+    // Copy data from flash to RAM. Aligned to FLASH_ERASE_BLOCK_SIZE
+    uint32_t address = (uint32_t)iter_prgparm->value_ptr & ~(FLASH_ERASE_BLOCK_SIZE - 1);
     LOG_DBG("tpfPatchInMem: address=0x%08x", address);
-    flash_read(rom_flash_dev, address, buf, FLASH_PAGE_SIZE);
+    flash_read(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, ram_buffer, FLASH_ERASE_BLOCK_SIZE);
     uint32_t offset = (uint32_t)iter_prgparm->value_ptr - address;
     LOG_DBG("tpfPatchInMem: offset=0x%08x", offset);
-    void *ramPointer = (void *)(buf + offset);
+    void *ramPointer = (void *)(ram_buffer + offset);
 
     switch(iter_prgparm->type){
         case PRG_TYPE_BOOL:
@@ -755,8 +714,8 @@ bool tpfPatchInMem(const char *name, const char *value)
     }
 
     // Write data back to flash
-    flash_erase(rom_flash_dev, address, FLASH_PAGE_SIZE);
-    flash_write(rom_flash_dev, address, buf, FLASH_PAGE_SIZE);
+    flash_erase(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, FLASH_ERASE_BLOCK_SIZE);
+    flash_write(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, ram_buffer, FLASH_ERASE_BLOCK_SIZE);
 
 	return true;
 }
