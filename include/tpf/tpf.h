@@ -84,8 +84,9 @@ typedef uint32_t			t_tpf_BITFIELD;	// Спеціальний тип, який в
 
 #define TPF_CONV(_type, _value) TPF_CONV_##_type(_value)
 
+#define	_PRG(_type)
 
-#define	_PRG(_type)   __attribute__((section(".progtable."  xstr(_TPF_ALIGN(_type)))))
+// #define	_PRG(_type)   __attribute__((section(".progtable."  xstr(_TPF_ALIGN(_type)))))
 #define _PRG_A  __attribute__((section(".progtable_array")))
 
 
@@ -118,7 +119,7 @@ typedef enum {
     //
 	PRG_TYPE_BITFIELD	= 20,	// Спеціальний тип, який використовується для мульти чекбоксів (до 32x значень)
 
-	PRG_TYPE_META		= 31	// Значение, состоящее из нескольких других. Мета-константа, не имеющая физического воплощения
+	// PRG_TYPE_META		= 31	// Значение, состоящее из нескольких других. Мета-константа, не имеющая физического воплощения
 	// 							// Данные константы располагаются в глобальной области и не доступны для модификации.
 	// 							// Вместо этого SMS-команда 1111 set <meta> <value1> <value2> <value3> ...
 	// 							// Модифицирует соответствущие констнанты.
@@ -129,7 +130,7 @@ typedef enum {
 struct tPrgParm {
 	const char *name;
 	const tprg_type type;
-	const void *value_ptr;
+	/*const */void *value_ptr;
 	const void *default_ptr;
 };
 
@@ -138,7 +139,7 @@ struct tPrgParm {
 #define TPF_FORM volatile
 
 #define TPF_DEF(_type, _name, _value)                                       \
-    TPF_FORM _TYPE(_type) VAR(_name) _PRG(_type) = TPF_CONV(_type, _value); \
+    TPF_FORM _TYPE(_type) VAR(_name) _PRG(_type) = TPF_CONV(_type, _value); /* Значення (у RAM) */ \
     const _TYPE(_type) _TPF_DF(_name) = TPF_CONV(_type, _value);        	\
     const char _TPF_NAME(_name)[] = {xstr(_name)};                          \
     const STRUCT_SECTION_ITERABLE(tPrgParm, _name) = {                      \

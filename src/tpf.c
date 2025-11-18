@@ -1,4 +1,4 @@
-#include "tpf.h"
+#include "tpf/tpf.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,12 +18,10 @@
 LOG_MODULE_REGISTER(tpf, LOG_LEVEL_DBG);
 
 
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(sram3), okay)
-#define _SRAM3_SECTION Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME(DT_NODELABEL(sram3)))
-#else
-#define _SRAM3_SECTION
-#endif
+// TODO: Треба визначитись, чи привʼязуємось ми до ZMS, чи воно залишиться універсальним
+#include <zephyr/settings/settings.h>
 
+#if 0
 extern const void *_progtable_start;
 extern const void *_progtable_stop;
 extern const void *_progtable_end;
@@ -58,12 +56,20 @@ struct nvs_fixture {
 #define FLASH_MEM CONFIG_FLASH_BASE_ADDRESS
 #define RAM_MEM   CONFIG_SRAM_BASE_ADDRESS
 
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(sram3), okay)
+#define _SRAM3_SECTION Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME(DT_NODELABEL(sram3)))
+#else
+#define _SRAM3_SECTION
+#endif
+
 static uint8_t ram_buffer[FLASH_ERASE_BLOCK_SIZE] _SRAM3_SECTION;
+#endif
 
 TPF_DEF(VOLTAGE, test_fpf, 12.3);
 
 int tpf_item_to_string(const struct tPrgParm *iter_prgparm, char* buf, size_t len, bool def);
 
+#if 0
 void tpfDumpRam(void)
 {
     int err;
@@ -165,9 +171,214 @@ void tpfDumpRam(void)
     LOG_HEXDUMP_INF(ram_buffer, 64, "readed TPF of constants");
     #endif
 }
+#endif
+
+// Налаштуємо перехоплювач, шоб будь які операції зі settings проходили через нього
+// Зробимо перехоплення орігінального ZMS бекенда
+// Тут ми збережемо вказівник на ОРИГІНАЛЬНИЙ ZMS бекенд
+static struct settings_store *original_store;
+
+// --- Наші функції-обгортки ---
+static int proxy_zms_load(struct settings_store *cs, const struct settings_load_arg *arg)
+{
+	LOG_DBG("proxy_load");
+	// Просто викликаємо оригінальну функцію. Ніяких змін в логіці завантаження.
+	return original_store->cs_itf->csi_load(original_store, arg);
+}
+
+// Структура для передачі даних в нашу callback-функцію
+struct direct_loader {
+    const void *data;
+    size_t len;
+};
+
+// Наша callback-функція, яка імітує читання.
+// Вона замінює лямбду.
+static ssize_t direct_read_cb(void *cb_arg, void *dst, size_t dst_len)
+{
+    struct direct_loader *l = (struct direct_loader *)cb_arg;
+
+    // Перевіряємо, чи достатньо місця в буфері призначення
+    if (dst_len < l->len) {
+        return -ENOMEM;
+    }
+
+    // Копіюємо дані
+    if (l->data) {
+        memcpy(dst, l->data, l->len);
+    }
+
+    return l->len;
+}
+
+static int proxy_zms_save(struct settings_store *cs, const char *name,
+                                const char *value, size_t val_len)
+{
+	LOG_DBG("proxy_zms_save");
+	// 1. Викликаємо оригінальну, складну функцію збереження з ZMS
+	int rc = original_store->cs_itf->csi_save(original_store, name, value, val_len);
+
+	// 2. Якщо вона відпрацювала успішно, додаємо НАШУ логіку
+    if (rc == 0 && val_len > 0) {
+		LOG_DBG("Fix");
+        // Готуємо структуру з даними для нашої callback-функції
+        struct direct_loader loader = { .data = value, .len = val_len };
+
+        // Викликаємо внутрішню функцію, яка знайде і викличе потрібний h_set,
+        // передаючи їй нашу статичну функцію direct_read_cb.
+        settings_call_set_handler(name, val_len, direct_read_cb, &loader, NULL);
+	}
+
+	// Просто викликаємо оригінальну функцію. Ніяких змін в логіці збереження.
+	return rc;
+}
+
+/* custom backend interface */
+static struct settings_store_itf settings_custom_itf = {
+    .csi_load = proxy_zms_load,
+    .csi_save = proxy_zms_save,
+};
+
+/* custom backend node */
+static struct settings_store settings_custom_store = {
+    .cs_itf = &settings_custom_itf
+};
+
+// #include "settings_priv.h"
+extern struct settings_store *settings_save_dst;
+
+// static uint16_t tpf_var1 = 123; // Значение по умолчанию = 123
+// static uint16_t tpf_var2 = 234; // Значение по умолчанию = 234
+
+int tpfCaseCmp(const char *s1, const char *s2);
+
+int tpf_item_from_string(const struct tPrgParm *iter_prgparm, const char* value);
+
+// Эта функция - часть инструкции. "Что делать, когда нашли документ в сейфе"
+static int my_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	LOG_DBG("my_settings_set '%s' (len %zu)", key, len);
+
+    // Шукаємо в налаштуваннях
+    STRUCT_SECTION_FOREACH(tPrgParm, p) {
+        if(tpfCaseCmp(p->name, key) == 0) {
+            LOG_INF("Found matching TPF item: %s", p->name);
+            char value[64];
+            ssize_t num_read_bytes = MIN(len, sizeof(value) - 1);
+            num_read_bytes = read_cb(cb_arg, value, num_read_bytes);
+            if (num_read_bytes < 0) {
+                LOG_ERR("Failed to read TPF item '%s'", p->name);
+                return 0;
+            }
+            // Додамо завершуючий нуль
+            value[num_read_bytes] = '\0';
+            // Успішно прочитали значення, тепер можемо його використовувати
+            // Треба зробити зворотнє перетворення
+            LOG_INF("TPF item '%s' has value: '%s'", p->name, value);
+
+            tpf_item_from_string(p, value);
+            return 0;
+        }
+        // int ret = tpf_item_to_string(prg, s, sizeof(s), false);
+        // LOG_INF("TPF item: %s = %s", prg->name, s);
+    }
+    LOG_ERR("TPF item not found");
+
+    #if 0
+	// LOG_HEXDUMP_INF(key, len, "SPY Key hexdump:");
+    // Секретарь спрашивает: "Документ называется 'mode'?"
+    if (strcmp(key, "var1") == 0) {
+        // Если да, то "Скопируй содержимое в ящик tpf_var1"
+        int rc = read_cb(cb_arg, &tpf_var1, sizeof(tpf_var1));
+        if (rc < 0) {
+			LOG_ERR("Failed to read 'var1' setting");
+            // Ошибка копирования
+            return rc;
+        }
+        LOG_INF("Successfully read 'var1' setting: %d", tpf_var1);
+        return 0; // Успех
+	} else if (strcmp(key, "var2") == 0) {
+        int rc = read_cb(cb_arg, &tpf_var2, sizeof(tpf_var2));
+        if (rc < 0) {
+			LOG_ERR("Failed to read 'var2' setting");
+            return rc;
+        }
+        LOG_INF("Successfully read 'var2' setting: %d", tpf_var2);
+        return 0;
+    } else {
+		LOG_DBG("Unknown setting key: %s", key);
+	}
+    #endif
+    return 0; // Не мой документ, проехали
+}
+
+// h_commit
+static int my_settings_commit(void)
+{
+	LOG_DBG("my_settings_commit");
+	return 0;
+}
+
+// h_export
+// static int my_settings_export(int (*storage_func)(const char *name,
+//                                                    const void *value,
+//                                                    size_t val_len))
+// {
+// 	LOG_DBG("my_settings_export");
+//     return storage_func("tpf/var1", &tpf_var1, sizeof(tpf_var1));
+// }
+
+// Собираем всю инструкцию в одну структуру
+SETTINGS_STATIC_HANDLER_DEFINE(
+    my_settings,          // Имя этой "инструкции"
+    "tpf",              // Название группы настроек (поддерево)
+    NULL,                 // get - нам не нужен для простого сохранения
+    my_settings_set,      // set - вот наша функция выше
+    my_settings_commit,                 // commit - пока не нужен
+    NULL //my_settings_export                  // export - пока не нужен
+);
+
 
 static int init(void)
 {
+	// Инициализируем. Це повинно налаштувати обраний бекенд (ZMS)
+    int rc = settings_subsys_init();
+    if (rc) {
+        LOG_ERR("settings_subsys_init failed (err %d)", rc);
+        return rc;
+    }
+
+	#if 0
+	// Зробимо шар-обгортку для оригінального ZMS бекенда
+	rc = settings_storage_get(&original_zms_store);
+	if (rc) {
+		LOG_ERR("Failed to get original ZMS store (err %d)", rc);
+		return;
+	}
+	// Підключаємо наш кастомний бекенд
+
+	// Підміняємо тільки dst, нас цікавить тільки збереження
+	settings_dst_register(&settings_custom_store);
+	#endif
+
+	// 1. Зберігаємо вказівник на оригінал (в теорії буде працювати будь який)
+    #if !defined(CONFIG_SETTINGS_ZMS)
+    #error "CONFIG_SETTINGS_ZMS must be defined"
+    #endif
+    original_store = settings_save_dst;
+
+    // 2. Підміняємо його на наш проксі
+    // settings_save_dst = &settings_custom_store;
+	// Підміняємо тільки dst, нас цікавить тільки збереження
+	settings_dst_register(&settings_custom_store);
+
+
+	LOG_INF("Load all values of TPF");
+    rc = settings_load_subtree("tpf");
+    if (rc) {
+        LOG_ERR("settings_load_subtree failed (err %d)", rc);
+    }
+
     return 0;
 }
 
@@ -181,11 +392,12 @@ SYS_INIT(init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
 #include <stdio.h>
 // #include "NuMicro.h"
 
-
+#if 0
 #define APROM_TEST_BASE             0x80000
 // #define APROM_TEST_END              APROM_TEST_BASE+0x4000
 #define APROM_TEST_END              APROM_TEST_BASE+0x1000
 #define TEST_PATTERN                0x5A5A5A5A
+#endif
 
 #if 0
 void SYS_Init(void);
@@ -470,6 +682,26 @@ void to_bit_field(t_tpf_BITFIELD value, char* buffer, size_t buffer_size)
 bool tpfPatchInMem(const char *name, const char *value)
 {
     LOG_DBG("tpfPatchInMem: %s=%s\n", name, value);
+
+    // TODO: Треба пройтись по параметрах і через tpfCaseCmp знайти відповідне орігінальне імʼя - key
+
+    STRUCT_SECTION_FOREACH(tPrgParm, p) {
+        if(tpfCaseCmp(p->name, name) == 0) {
+            char key[64];
+            snprintf(key, sizeof(key), "tpf/%s", p->name);
+
+            settings_save_one(key, value, strlen(value));
+            return true;
+        }
+    }
+
+    LOG_ERR("tpfPatchInMem: %s not found", name);
+    return false;
+
+
+    // TODO: Якшо не буде автосинхронізації, то ще треба оновити наявне значення
+
+    #if 0
     const struct tPrgParm *iter_prgparm;
     const char **sub_vars;
     char sub_value[32];
@@ -716,7 +948,7 @@ bool tpfPatchInMem(const char *name, const char *value)
     // Write data back to flash
     flash_erase(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, FLASH_ERASE_BLOCK_SIZE);
     flash_write(rom_flash_dev, address - CONFIG_FLASH_BASE_ADDRESS, ram_buffer, FLASH_ERASE_BLOCK_SIZE);
-
+#endif
 	return true;
 }
 
@@ -789,7 +1021,7 @@ static const struct json_obj_descr json_descr[] = {
 int tpf_item_to_string(const struct tPrgParm *iter_prgparm, char* buf, size_t len, bool def)
 {
     if(len) buf[0] = '\0';
-    const void *value_ptr = def ? (iter_prgparm->default_ptr) : (iter_prgparm->value_ptr);
+    void *value_ptr = def ? (iter_prgparm->default_ptr) : (iter_prgparm->value_ptr);
     switch(iter_prgparm->type){
         case PRG_TYPE_BOOL:
             snprintf(buf, len, "%s", ((t_tpf_BOOL*)value_ptr)[0] ? "true" : "false");
@@ -837,6 +1069,228 @@ int tpf_item_to_string(const struct tPrgParm *iter_prgparm, char* buf, size_t le
     }
     return 0;
 }
+
+int tpf_item_from_string(const struct tPrgParm *iter_prgparm, const char* value)
+{
+    if(iter_prgparm == NULL || value == NULL) return -1;
+    void *ramPointer = iter_prgparm->value_ptr;
+
+    switch(iter_prgparm->type){
+        case PRG_TYPE_BOOL:
+            // false = 0, true = 1
+            // DEBUG_PRINT("  >> Patch as BOOL");
+            ((t_tpf_BOOL*)ramPointer)[0] = (strcmp(value, "true") == 0) ? 1 : 0;
+            break;
+        case PRG_TYPE_UINT8:	// 8мі бітне беззнакове
+            ((t_tpf_UINT8*)ramPointer)[0] = atoi(value);
+            break;
+        // case PRG_TYPE_INT16:	// Значение, равное машинному слову, знаковое (для PIC32 - это 31 бит + знак)
+        //     ((t_tpf_INT16*)ramPointer)[0] = atol(value);
+        //     break;
+        // case PRG_TYPE_UINT16:	// Значение, равное машинному слову, беззнаковое (для PIC32 - это 32 бита)
+        //     ((t_tpf_UINT16*)ramPointer)[0] = atol(value);
+        //     break;
+        case PRG_TYPE_INT32:	// Значение, равное машинному слову, знаковое (для PIC32 - это 31 бит + знак)
+            ((t_tpf_INT32*)ramPointer)[0] = atoll(value);
+            break;
+        case PRG_TYPE_UINT32:	// Значение, равное машинному слову, беззнаковое (для PIC32 - это 32 бита)
+            ((t_tpf_UINT32*)ramPointer)[0] = atoll(value);
+            break;
+        // case PRG_TYPE_INT64:	// Значение 64 бит знаковое
+        //     // DEBUG_PRINT("  >> Patch as INT64");
+        //     ((t_tpf_INT64*)ramPointer)[0] = atoll(value);
+        //     break;
+        // case PRG_TYPE_STR16:	// Строковое значение (до 16ти символов)
+        //     // DEBUG_PRINT("  >> Patch as STR16");
+        //     strncpy((char *)ramPointer, value, 16);
+        //     break;
+        case PRG_TYPE_STR64:	// Строковое значение (до 64х символов)
+            // DEBUG_PRINT("  >> Patch as STR64");
+            strncpy((char *)ramPointer, value, 64);
+            break;
+        // case PRG_TYPE_BOOL:		// Булевое значение (1 бит) * Я пока не придумал механизма хранения значений
+        //     DEBUG_PRINT("  >> Patch as BOOL");
+        //     ((t_tpf_INT32*)ramPointer)[0] = atoi(value);
+        //     break;
+        case PRG_TYPE_TIME_MS:		// Значение, используется в таймерах, интервалах времени и т.п.
+            // DEBUG_PRINT("  >> Patch as TIME");
+            // ((t_tpf_TIME_MS*)ramPointer)[0] = (t_tpf_TIME)(atof(value) * 32.0 + 0.0);
+            LOG_ERR("PRG_TYPE_TIME_MS not implemented");
+            break;
+        // case PRG_TYPE_PIN4:
+        //     // DEBUG_PRINT("  >> Patch as PIN4");
+        //     ((t_tpf_UINT32*)ramPointer)[0] = strtoul(value, NULL, 16);  //  Странно что strtoll меньше места занимает чем strtoul
+        //     break;
+		// case PRG_TYPE_SIGNALS:
+		// 	// DEBUG_PRINT("  >> Patch as SIGNALS");
+		// 	if(strcasecmp(value, "off") == 0){
+		// 		((t_tpf_SIGNALS*)ramPointer)[0] =  PRG_SIGNALS_OFF;
+		// 	} else if(strcasecmp(value, "lights") == 0){
+		// 		((t_tpf_SIGNALS*)ramPointer)[0] =  PRG_SIGNALS_LIGHTS;
+		// 	} else if(strcasecmp(value, "siren") == 0){
+		// 		((t_tpf_SIGNALS*)ramPointer)[0] =  PRG_SIGNALS_SIREN;
+		// 	} else if(strcasecmp(value, "both") == 0){
+		// 		((t_tpf_SIGNALS*)ramPointer)[0] =  PRG_SIGNALS_BOTH;
+		// 	} else {
+		// 		return false;
+		// 	}
+		// 	break;
+		// case PRG_TYPE_ALERTS:
+		// 	// DEBUG_PRINT("  >> Patch as ALERTS");
+		// 	if(strcasecmp(value, "off") == 0){
+		// 		((t_tpf_ALERTS*)ramPointer)[0] =  PRG_ALERTS_OFF;
+		// 	} else if(strcasecmp(value, "sms") == 0){
+		// 		((t_tpf_ALERTS*)ramPointer)[0] =  PRG_ALERTS_SMS;
+		// 	} else if(strcasecmp(value, "call") == 0){
+		// 		((t_tpf_ALERTS*)ramPointer)[0] =  PRG_ALERTS_CALL;
+		// 	} else if(strcasecmp(value, "both") == 0){
+		// 		((t_tpf_ALERTS*)ramPointer)[0] =  PRG_ALERTS_BOTH;
+		// 	} else {
+		// 		return false;
+		// 	}
+		// 	break;
+		// case PRG_TYPE_INPUT:
+		// 	// DEBUG_PRINT("  >> Patch as INPUT");
+		// 	if(strcasecmp(value, "off") == 0){
+		// 		((t_tpf_INPUT*)ramPointer)[0] = INPUTS_FUN_OFF;
+		// 	} else if(strcasecmp(value, "kofr1") == 0){
+		// 		((t_tpf_INPUT*)ramPointer)[0] = INPUTS_FUN_KOFR1;
+		// 	} else if(strcasecmp(value, "kofr2") == 0){
+		// 		((t_tpf_INPUT*)ramPointer)[0] = INPUTS_FUN_KOFR2;
+		// 	} else if(strcasecmp(value, "stand") == 0){
+		// 		((t_tpf_INPUT*)ramPointer)[0] = INPUTS_FUN_STAND;
+		// 	// } else if(strcasecmp(value, "brake") == 0){
+		// 	// 	((t_tpf_INPUT*)ramPointer)[0] = INPUTS_FUN_BRAKE;
+		// 	} else if(strcasecmp(value, "zone1") == 0){
+		// 		((t_tpf_INPUT*)ramPointer)[0] = INPUTS_FUN_ZONE1;
+		// 	} else if(strcasecmp(value, "zone2") == 0){
+		// 		((t_tpf_INPUT*)ramPointer)[0] = INPUTS_FUN_ZONE2;
+		// 	} else {
+		// 		return false;
+		// 	}
+		// 	break;
+		// case PRG_TYPE_INPUT_CON:
+		// 	// DEBUG_PRINT("  >> Patch as INPUT_CON");
+		// 	if(strcasecmp(value, "nc") == 0){
+		// 		((t_tpf_INPUT_CON*)ramPointer)[0] = INPUTS_CON_NC;
+		// 	} else if(strcasecmp(value, "no") == 0){
+		// 		((t_tpf_INPUT_CON*)ramPointer)[0] = INPUTS_CON_NO;
+		// 	} else if(strcasecmp(value, "p") == 0){
+		// 		((t_tpf_INPUT_CON*)ramPointer)[0] = INPUTS_CON_P;
+		// 	} else if(strcasecmp(value, "n") == 0){
+		// 		((t_tpf_INPUT_CON*)ramPointer)[0] = INPUTS_CON_N;
+		// 	} else {
+		// 		return false;
+		// 	}
+		// 	break;
+		// case PRG_TYPE_INPUT_IMP:
+		// 	// DEBUG_PRINT("  >> Patch as INPUT_IMP");
+		// 	if((*value == '\0') || (strcasecmp(value, "0") == 0)){
+		// 		((t_tpf_INPUT_IMP*)ramPointer)[0] = INPUTS_IMP_0K;
+		// 	} else if(strcasecmp(value, "r") == 0){
+		// 		((t_tpf_INPUT_IMP*)ramPointer)[0] = INPUTS_IMP_100K;
+		// 	} else {
+		// 		return false;
+		// 	}
+		// 	break;
+		// case PRG_TYPE_OUTPUT:
+		// 	// DEBUG_PRINT("  >> Patch as OUTPUT");
+		// 	if(strcasecmp(value, "off") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_OFF;
+		// 	} else if(strcasecmp(value, "siren") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_SIREN;
+		// 	} else if(strcasecmp(value, "lights") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_LIGHTS;
+		// 	} else if(strcasecmp(value, "disable") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_DISABLE;
+		// 	} else if(strcasecmp(value, "enable") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_ENABLE;
+		// 	} else if(strcasecmp(value, "disablei") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_DISABLE_I;
+		// 	} else if(strcasecmp(value, "enablei") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_ENABLE_I;
+		// 	} else if(strcasecmp(value, "horn") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_SIGNAL;
+		// 	} else if(strcasecmp(value, "channel1") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_DOP_1;
+		// 	} else if(strcasecmp(value, "channel2") == 0){
+		// 		((t_tpf_OUTPUT*)ramPointer)[0] = OUTS_FUN_DOP_2;
+		// 	} else {
+		// 		return false;
+		// 	}
+		// 	break;
+		// case PRG_TYPE_ACT:
+		// 	// DEBUG_PRINT("  >> Patch as ACT");
+		// 	if(strcasecmp(value, "off") == 0){
+		// 		((t_tpf_ACT*)ramPointer)[0] =  PRG_ACT_OFF;
+		// 	} else if(strcasecmp(value, "arm") == 0){
+		// 		((t_tpf_ACT*)ramPointer)[0] =  PRG_ACT_ARM;
+		// 	} else if(strcasecmp(value, "disarm") == 0){
+		// 		((t_tpf_ACT*)ramPointer)[0] =  PRG_ACT_DISARM;
+		// 	} else if(strcasecmp(value, "both") == 0){
+		// 		((t_tpf_ACT*)ramPointer)[0] =  PRG_ACT_BOTH;
+		// 	} else {
+		// 		return false;
+		// 	}
+		// 	break;
+		case PRG_TYPE_VOLTAGE:		// Значение, используется в зарядке, в режимах потребления, и т.д.
+            // DEBUG_PRINT("  >> Patch as VOLTAGE");
+            ((t_tpf_VOLTAGE*)ramPointer)[0] = (t_tpf_VOLTAGE)(atof(value) * 1000.0);
+            break;
+
+        case PRG_TYPE_CURRENT:		// Значение, используется в зарядке, в режимах потребления, и т.д.
+            // DEBUG_PRINT("  >> Patch as CURRENT (%d -> %d)", ((t_tpf_CURRENT*)ramPointer)[0], (t_tpf_CURRENT)(atof(value) * 1000.0));
+            ((t_tpf_CURRENT*)ramPointer)[0] = (t_tpf_CURRENT)(atof(value) * 1000.0);
+            break;
+
+		// case PRG_TYPE_TEMPERATURE:
+        //     ((t_tpf_TEMPERATURE*)ramPointer)[0] = (t_tpf_TEMPERATURE)(atof(value) * 10.0 + 0.5);
+        //     break;
+		// case PRG_TYPE_TILTANGLE: {		// Значение, используется в датчике наклона.
+        //     ((t_tpf_TILTANGLE*)ramPointer)[0] = (t_tpf_TILTANGLE)(atof(value) * 10.0 + 0.5);
+        //     break; }
+        case PRG_TYPE_INPUT:
+            ((t_tpf_INPUT*)ramPointer)[0] = io_input_value_to_func(value);
+            break;
+        case PRG_TYPE_OUTPUT:
+            ((t_tpf_OUTPUT*)ramPointer)[0] = io_output_value_to_func(value);
+            break;
+        case PRG_TYPE_TIME:
+            LOG_ERR("TPF: TPF_CONV_TIME not implemented");
+            float f = atof(value);
+            ((t_tpf_TIME*)ramPointer)[0] = K_MSEC((int)(f*1000.0f));
+            break;
+
+        case PRG_TYPE_BITFIELD:	// Значення типу "a,b,c" => (1<<0)|(1<<1)|(1<<4)
+            ((t_tpf_BITFIELD*)ramPointer)[0] = from_bit_field(value);
+            break;
+
+
+        // case PRG_TYPE_META:
+        //     //  TODO:
+        //     sub_vars = (const char **)iter_prgparm->value_ptr;
+        //     p = value;
+        //     while(*sub_vars){
+        //         // Копируем часть значения до пробела (или конца строки)
+        //         i = 0;
+        //         while((*p != ' ') && (*p != '\0') && (i < (sizeof(sub_value) - 1) )){
+        //             sub_value[i] = *p;
+        //             p++;
+        //             i++;
+        //         }
+        //         sub_value[i] = '\0';
+        //         if(*p == ' ') p++;
+		// 		if(!tpfPatchInMem(*sub_vars, sub_value)) {
+		// 			return false;
+		// 		}
+        //         sub_vars++;
+        //     }
+
+        //     break;
+    }
+
+}
+
 
 int tpf_dump_as_json(char *buffer, size_t buffer_size, bool include_defaults, uint32_t timestamp)
 {
